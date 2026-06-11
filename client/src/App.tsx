@@ -276,26 +276,32 @@ function App() {
           </div>
 
           {mode === 'draw' ? (
-            <div className="canvas-wrapper">
-              <div className="canvas-container">
-                <canvas
-                  ref={canvasRef}
-                  onMouseDown={startDrawing}
-                  onMouseMove={draw}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={stopDrawing}
-                  onTouchStart={startDrawing}
-                  onTouchMove={draw}
-                  onTouchEnd={stopDrawing}
-                />
+            <>
+              <div className="canvas-wrapper">
+                <div className="canvas-container">
+                  <canvas
+                    ref={canvasRef}
+                    onMouseDown={startDrawing}
+                    onMouseMove={draw}
+                    onMouseUp={stopDrawing}
+                    onMouseLeave={stopDrawing}
+                    onTouchStart={startDrawing}
+                    onTouchMove={draw}
+                    onTouchEnd={stopDrawing}
+                  />
+                </div>
+                <button className="clear-btn" onClick={clearCanvas}>Limpar</button>
               </div>
-              <button className="clear-btn" onClick={clearCanvas}>Limpar</button>
-            </div>
+              <p className="hint">Desenhe sua assinatura no quadro acima usando o mouse ou o dedo</p>
+            </>
           ) : (
-            <div className="photo-input-container" onClick={() => document.getElementById('cam')?.click()}>
-              <input id="cam" type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => setPhoto(e.target.files?.[0] || null)} />
-              <span>{photo ? '✅ Foto selecionada' : '📸 Clique para capturar ou enviar foto'}</span>
-            </div>
+            <>
+              <div className="photo-input-container" onClick={() => document.getElementById('cam')?.click()}>
+                <input id="cam" type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => setPhoto(e.target.files?.[0] || null)} />
+                <span>{photo ? '✅ Foto selecionada' : '📸 Clique para capturar ou enviar foto'}</span>
+              </div>
+              <p className="hint">📌 Tire uma foto da sua <strong>assinatura</strong> (no papel), não uma selfie</p>
+            </>
           )}
 
           <button className="submit-btn" onClick={handleSubmit} disabled={loading || !name.trim()}>
