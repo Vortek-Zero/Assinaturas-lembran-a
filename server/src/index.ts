@@ -3,13 +3,13 @@ import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import sharp from 'sharp';
+import https from 'https';
+import { createClient } from '@supabase/supabase-js';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { ZipArchive } = require('archiver') as { ZipArchive: new (options?: Record<string, any>) => any };
-import https from 'https';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -17,22 +17,14 @@ const PORT = process.env.PORT || 3001;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configuração de diretórios
-const DATA_DIR = path.join(__dirname, '../../data');
-const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const JSON_FILE = path.join(DATA_DIR, 'signatures.json');
-
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
-
-if (!fs.existsSync(JSON_FILE) || fs.readFileSync(JSON_FILE, 'utf-8').trim() === '') {
-  fs.writeFileSync(JSON_FILE, JSON.stringify([], null, 2));
-}
+// Supabase
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const supabase = createClient(SUPABASE_URL!, SUPABASE_KEY!);
+const BUCKET = 'signatures';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use('/uploads', express.static(UPLOADS_DIR));
 
 const CLIENT_DIST = path.join(__dirname, '../../client/dist');
 if (fs.existsSync(CLIENT_DIST)) {
@@ -52,88 +44,8 @@ if (RENDER_URL) {
   }, 600000);
 }
 
-// Backup automático para GitHub (via API)
-const GIT_TOKEN = process.env.GIT_TOKEN;
-const GH_HEADERS = {
-  Authorization: `Bearer ${GIT_TOKEN}`,
-  'Content-Type': 'application/json',
-  'User-Agent': 'assinaturas-backup'
-};
-
-async function syncToGitHub() {
-  if (!GIT_TOKEN) { console.log('[BACKUP] GIT_TOKEN não configurado'); return; }
-  try {
-    console.log('[BACKUP] Iniciando...');
-
-    // 1. Pega SHA atual do signatures.json (se existir)
-    let sha;
-    try {
-      const get = await fetch('https://api.github.com/repos/Vortek-Zero/armazenamento/contents/signatures.json', { headers: GH_HEADERS });
-      if (get.ok) sha = (await get.json()).sha;
-    } catch {}
-
-    // 2. Envia signatures.json
-    const jsonContent = fs.readFileSync(JSON_FILE, 'utf-8');
-    const body = {
-      message: `backup ${new Date().toISOString()}`,
-      content: Buffer.from(jsonContent).toString('base64'),
-      ...(sha ? { sha } : {})
-    };
-    const put = await fetch('https://api.github.com/repos/Vortek-Zero/armazenamento/contents/signatures.json', {
-      method: 'PUT', headers: GH_HEADERS, body: JSON.stringify(body)
-    });
-    const putText = await put.text();
-    console.log(`[BACKUP] signatures.json -> ${put.status}: ${putText.slice(0, 200)}`);
-    if (!put.ok) return;
-
-    // 3. Envia imagens
-    const files = fs.readdirSync(UPLOADS_DIR).filter(f => f !== '.gitkeep');
-    for (const file of files) {
-      let shaImg;
-      try {
-        const get = await fetch(`https://api.github.com/repos/Vortek-Zero/armazenamento/contents/uploads/${file}`, { headers: GH_HEADERS });
-        if (get.ok) shaImg = (await get.json()).sha;
-      } catch {}
-      const imgBody = {
-        message: `backup ${new Date().toISOString()}`,
-        content: fs.readFileSync(path.join(UPLOADS_DIR, file)).toString('base64'),
-        ...(shaImg ? { sha: shaImg } : {})
-      };
-      const put = await fetch(`https://api.github.com/repos/Vortek-Zero/armazenamento/contents/uploads/${file}`, {
-        method: 'PUT', headers: GH_HEADERS, body: JSON.stringify(imgBody)
-      });
-      const txt = await put.text();
-      console.log(`[BACKUP] ${file} -> ${put.status}`);
-      if (!put.ok) { console.error(`[BACKUP] Erro ${file}: ${txt.slice(0, 200)}`); return; }
-    }
-    console.log('[BACKUP] Completo!');
-  } catch (err) {
-    console.error('[BACKUP] Erro:', err);
-  }
-}
-
-// Configuração do Multer para upload de fotos
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.png';
-    cb(null, `${uuidv4()}${ext}`);
-  }
-});
-
-const upload = multer({ storage });
-
-interface SignatureEntry {
-  id: string;
-  name: string;
-  imagePath: string;
-  timestamp: string;
-  type: 'draw' | 'photo';
-  deviceId: string;
-  password?: string;
-}
+// Multer — diretório temporário
+const upload = multer({ dest: '/tmp/uploads' });
 
 function sanitizeFileName(name: string): string {
   return name
@@ -150,87 +62,115 @@ function formatTimestamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
 }
 
-function readSignatures(): SignatureEntry[] {
-  try {
-    const raw = fs.readFileSync(JSON_FILE, 'utf-8').trim();
-    if (!raw) return [];
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
+// POST /api/signature
 app.post('/api/signature', upload.single('photo'), async (req, res) => {
   try {
     const { name, drawImage, deviceId, password } = req.body;
-    let fileName = '';
-    let type: 'draw' | 'photo' = 'draw';
 
     if (!deviceId) {
       return void res.status(400).json({ error: 'Identificador do dispositivo não enviado.' });
     }
 
     const normalized = name.trim().toLowerCase();
-    const allData = readSignatures();
 
-    const nameExists = allData.some(s => s.name.toLowerCase() === normalized);
-    if (nameExists) {
+    const { data: existingName } = await supabase
+      .from('signatures')
+      .select('id')
+      .ilike('name', normalized)
+      .maybeSingle();
+    if (existingName) {
       return void res.status(409).json({ error: 'alguem já salvou com esse nome.' });
     }
 
-    const deviceExists = allData.some(s => s.deviceId === deviceId);
-    if (deviceExists) {
+    const { data: existingDevice } = await supabase
+      .from('signatures')
+      .select('id')
+      .eq('device_id', deviceId)
+      .maybeSingle();
+    if (existingDevice) {
       return void res.status(409).json({ error: 'Dispositivo ja realizou uma assinatura. Exclua a anterior para fazer outra.' });
     }
 
     const baseName = sanitizeFileName(name);
     const ts = formatTimestamp();
+    const fileName = `${baseName}_${ts}.jpg`;
+    let type: 'draw' | 'photo' = 'draw';
+    let imageBuffer: Buffer;
 
     if (req.file) {
-      fileName = `${baseName}_${ts}.jpg`;
-      const outPath = path.join(UPLOADS_DIR, fileName);
-      await sharp(req.file.path)
+      type = 'photo';
+      imageBuffer = await sharp(req.file.path)
         .resize({ width: 800, withoutEnlargement: true })
         .jpeg({ quality: 75 })
-        .toFile(outPath);
+        .toBuffer();
       fs.unlinkSync(req.file.path);
-      type = 'photo';
     } else if (drawImage) {
-      type = 'draw';
-      fileName = `${baseName}_${ts}.jpg`;
-      const buf = Buffer.from(drawImage.replace(/^data:image\/png;base64,/, ""), 'base64');
-      await sharp(buf)
+      const buf = Buffer.from(drawImage.replace(/^data:image\/png;base64,/, ''), 'base64');
+      imageBuffer = await sharp(buf)
         .resize({ width: 800, withoutEnlargement: true })
         .flatten({ background: { r: 255, g: 255, b: 255 } })
         .jpeg({ quality: 75 })
-        .toFile(path.join(UPLOADS_DIR, fileName));
+        .toBuffer();
     } else {
       return void res.status(400).json({ error: 'Nenhuma assinatura fornecida.' });
     }
 
-    const newEntry: SignatureEntry = {
-      id: uuidv4(),
-      name: name.trim(),
-      imagePath: fileName,
-      timestamp: new Date().toLocaleString('pt-BR'),
-      type,
-      deviceId,
-      ...(password ? { password } : {})
-    };
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(fileName, imageBuffer, { contentType: 'image/jpeg', upsert: true });
+    if (uploadErr) {
+      console.error('Erro upload Storage:', uploadErr);
+      return void res.status(500).json({ error: 'Erro ao salvar imagem.' });
+    }
 
-    const currentData = readSignatures();
-    currentData.push(newEntry);
-    fs.writeFileSync(JSON_FILE, JSON.stringify(currentData, null, 4));
+    const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(fileName);
+    const imageUrl = urlData.publicUrl;
 
-    res.status(201).json({ success: true, entry: newEntry });
-    setTimeout(() => syncToGitHub(), 0);
+    const { data: inserted, error: dbErr } = await supabase
+      .from('signatures')
+      .insert({
+        name: name.trim(),
+        image_path: fileName,
+        image_url: imageUrl,
+        timestamp: new Date().toLocaleString('pt-BR'),
+        type,
+        device_id: deviceId,
+        ...(password ? { password } : {})
+      })
+      .select()
+      .single();
+
+    if (dbErr) {
+      console.error('Erro DB:', dbErr);
+      await supabase.storage.from(BUCKET).remove([fileName]);
+      return void res.status(500).json({ error: 'Erro ao salvar dados.' });
+    }
+
+    res.status(201).json({ success: true, entry: inserted });
   } catch (error) {
     console.error('Erro ao salvar assinatura:', error);
     res.status(500).json({ error: 'Erro interno do servidor.' });
   }
 });
 
-app.delete('/api/signature/:id', (req, res) => {
+// GET /api/signatures
+app.get('/api/signatures', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('signatures')
+      .select('id, name, image_path, image_url, timestamp, type, device_id')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    console.error('Erro ao listar:', error);
+    res.status(500).json({ error: 'Erro ao ler dados.' });
+  }
+});
+
+// DELETE /api/signature/:id
+app.delete('/api/signature/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { password } = req.body;
@@ -239,9 +179,13 @@ app.delete('/api/signature/:id', (req, res) => {
       return res.status(400).json({ error: 'Senha deve ter exatamente 4 dígitos.' });
     }
 
-    const data = readSignatures();
-    const entry = data.find(s => s.id === id);
-    if (!entry) {
+    const { data: entry, error: findErr } = await supabase
+      .from('signatures')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findErr || !entry) {
       return res.status(404).json({ error: 'Assinatura não encontrada.' });
     }
 
@@ -249,32 +193,24 @@ app.delete('/api/signature/:id', (req, res) => {
       return res.status(403).json({ error: 'Senha incorreta.' });
     }
 
-    const filePath = path.join(UPLOADS_DIR, entry.imagePath);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-    const filtered = data.filter(s => s.id !== id);
-    fs.writeFileSync(JSON_FILE, JSON.stringify(filtered, null, 4));
+    await supabase.storage.from(BUCKET).remove([entry.image_path]);
+    await supabase.from('signatures').delete().eq('id', id);
+
     res.json({ success: true });
   } catch (error) {
-    console.error('Erro ao deletar assinatura:', error);
+    console.error('Erro ao deletar:', error);
     res.status(500).json({ error: 'Erro interno do servidor.' });
   }
 });
 
-app.get('/api/signatures', (req, res) => {
+// GET /api/admin/download-all
+app.get('/api/admin/download-all', async (req, res) => {
   try {
-    const currentData = readSignatures().map(({ password, ...rest }) => rest);
-    res.json(currentData);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao ler dados.' });
-  }
-});
+    const { data: signatures, error } = await supabase
+      .from('signatures')
+      .select('id, name, image_path, image_url');
 
-app.get('/api/admin/download-all', (req, res) => {
-  try {
-    const signatures = readSignatures();
-    if (signatures.length === 0) {
+    if (error || !signatures || signatures.length === 0) {
       return void res.status(404).json({ error: 'Nenhuma assinatura para baixar.' });
     }
 
@@ -282,18 +218,14 @@ app.get('/api/admin/download-all', (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename=assinaturas.zip');
 
     const archive = new ZipArchive({ zlib: { level: 9 } });
-
-    archive.on('error', (err: unknown) => {
-      console.error('Archive error:', err);
-    });
-
+    archive.on('error', (err: unknown) => console.error('Archive error:', err));
     archive.pipe(res);
 
     for (const sig of signatures) {
-      const filePath = path.join(UPLOADS_DIR, sig.imagePath);
-      if (fs.existsSync(filePath)) {
-        const ext = path.extname(sig.imagePath);
-        archive.file(filePath, { name: `${sig.name}${ext}` });
+      const { data: blob } = await supabase.storage.from(BUCKET).download(sig.image_path);
+      if (blob) {
+        const ext = path.extname(sig.image_path);
+        archive.append(Buffer.from(await blob.arrayBuffer()), { name: `${sig.name}${ext}` });
       }
     }
 
@@ -304,6 +236,12 @@ app.get('/api/admin/download-all', (req, res) => {
       try { res.status(500).json({ error: 'Erro ao gerar ZIP.' }); } catch (_) {}
     }
   }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM recebido, encerrando...');
+  process.exit(0);
 });
 
 app.listen(PORT, () => {
