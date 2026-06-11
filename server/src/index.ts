@@ -62,8 +62,9 @@ function syncToGitHub() {
   if (!GIT_TOKEN) return;
   try {
     const authUrl = BACKUP_REPO.replace('https://', `https://${GIT_TOKEN}@`);
+    const git = (args: string) => execSync(`git -C "${BACKUP_DIR}" ${args}`, { stdio: 'inherit', timeout: 30000 });
     if (!fs.existsSync(BACKUP_DIR)) {
-      execSync(`git clone ${authUrl} "${BACKUP_DIR}"`, { stdio: 'pipe', timeout: 30000 });
+      execSync(`git clone ${authUrl} "${BACKUP_DIR}"`, { stdio: 'inherit', timeout: 30000 });
     }
     fs.copyFileSync(JSON_FILE, path.join(BACKUP_DIR, 'signatures.json'));
     const uploadsBackup = path.join(BACKUP_DIR, 'uploads');
@@ -72,12 +73,14 @@ function syncToGitHub() {
       if (file === '.gitkeep') continue;
       fs.copyFileSync(path.join(UPLOADS_DIR, file), path.join(uploadsBackup, file));
     }
-    execSync(`git -C "${BACKUP_DIR}" add -A`, { stdio: 'pipe', timeout: 30000 });
     try {
-      execSync(`git -C "${BACKUP_DIR}" commit -m "backup ${new Date().toISOString()}"`, { stdio: 'pipe', timeout: 30000 });
-    } catch {}
-    execSync(`git -C "${BACKUP_DIR}" push`, { stdio: 'pipe', timeout: 30000 });
-    console.log('Backup enviado para GitHub');
+      git(`add -A`);
+      git(`-c user.name="Backup" -c user.email="backup@bot.com" commit -m "backup ${new Date().toISOString()}"`);
+      git(`push`);
+      console.log('Backup enviado para GitHub');
+    } catch {
+      console.log('Nada novo pra enviar pro backup');
+    }
   } catch (err) {
     console.error('Erro no backup automático:', err);
   }
