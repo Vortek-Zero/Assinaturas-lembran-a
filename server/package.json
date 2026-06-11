@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "cd ../client && npm install && npm run build",
-    "start": "npm run build && tsx src/index.ts",
+    "prebuild": "cd ../client && npm install",
+    "build": "cd ../client && npm run build",
+    "start": "tsx src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
