@@ -54,74 +54,61 @@ if (RENDER_URL) {
 
 // Backup automático para GitHub (via API)
 const GIT_TOKEN = process.env.GIT_TOKEN;
+const GH_HEADERS = {
+  Authorization: `Bearer ${GIT_TOKEN}`,
+  'Content-Type': 'application/json',
+  'User-Agent': 'assinaturas-backup'
+};
 
 async function syncToGitHub() {
-  if (!GIT_TOKEN) return;
-  const api = (method: string, path: string, body?: any) =>
-    new Promise<any>((resolve, reject) => {
-      const data = body ? JSON.stringify(body) : undefined;
-      const req = https.request({
-        hostname: 'api.github.com',
-        path: `/repos/Vortek-Zero/armazenamento/contents/${path}`,
-        method,
-        headers: {
-          Authorization: `Bearer ${GIT_TOKEN}`,
-          'User-Agent': 'assinaturas-backup',
-          'Content-Type': 'application/json',
-          ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {})
-        }
-      }, (res) => {
-        let chunks = '';
-        res.on('data', (c) => chunks += c);
-        res.on('end', () => {
-          const parsed = chunks ? JSON.parse(chunks) : null;
-          resolve({ status: res.statusCode!, ok: res.statusCode! >= 200 && res.statusCode! < 300, data: parsed, raw: chunks });
-        });
-      });
-      req.on('error', reject);
-      if (data) req.write(data);
-      req.end();
-    });
-
+  if (!GIT_TOKEN) { console.log('[BACKUP] GIT_TOKEN não configurado'); return; }
   try {
-    // Pega SHA atual se existir (necessário pra atualizar)
-    const get = await api('GET', 'signatures.json');
-    const sha = get.ok ? get.data.sha : undefined;
+    console.log('[BACKUP] Iniciando...');
 
-    // Sobe signatures.json
+    // 1. Pega SHA atual do signatures.json (se existir)
+    let sha;
+    try {
+      const get = await fetch('https://api.github.com/repos/Vortek-Zero/armazenamento/contents/signatures.json', { headers: GH_HEADERS });
+      if (get.ok) sha = (await get.json()).sha;
+    } catch {}
+
+    // 2. Envia signatures.json
     const jsonContent = fs.readFileSync(JSON_FILE, 'utf-8');
-    const put = await api('PUT', 'signatures.json', {
+    const body = {
       message: `backup ${new Date().toISOString()}`,
       content: Buffer.from(jsonContent).toString('base64'),
       ...(sha ? { sha } : {})
+    };
+    const put = await fetch('https://api.github.com/repos/Vortek-Zero/armazenamento/contents/signatures.json', {
+      method: 'PUT', headers: GH_HEADERS, body: JSON.stringify(body)
     });
-    if (!put.ok) {
-      console.error(`Erro API signatures.json: ${put.status} ${put.raw.slice(0, 200)}`);
-      return;
-    }
-    console.log('signatures.json enviado');
+    const putText = await put.text();
+    console.log(`[BACKUP] signatures.json -> ${put.status}: ${putText.slice(0, 200)}`);
+    if (!put.ok) return;
 
-    // Sobe imagens
+    // 3. Envia imagens
     const files = fs.readdirSync(UPLOADS_DIR).filter(f => f !== '.gitkeep');
     for (const file of files) {
-      const filePath = path.join(UPLOADS_DIR, file);
-      const imageB64 = fs.readFileSync(filePath).toString('base64');
-      const getImg = await api('GET', `uploads/${file}`);
-      const shaImg = getImg.ok ? getImg.data.sha : undefined;
-      const putImg = await api('PUT', `uploads/${file}`, {
+      let shaImg;
+      try {
+        const get = await fetch(`https://api.github.com/repos/Vortek-Zero/armazenamento/contents/uploads/${file}`, { headers: GH_HEADERS });
+        if (get.ok) shaImg = (await get.json()).sha;
+      } catch {}
+      const imgBody = {
         message: `backup ${new Date().toISOString()}`,
-        content: imageB64,
+        content: fs.readFileSync(path.join(UPLOADS_DIR, file)).toString('base64'),
         ...(shaImg ? { sha: shaImg } : {})
+      };
+      const put = await fetch(`https://api.github.com/repos/Vortek-Zero/armazenamento/contents/uploads/${file}`, {
+        method: 'PUT', headers: GH_HEADERS, body: JSON.stringify(imgBody)
       });
-      if (!putImg.ok) {
-        console.error(`Erro API ${file}: ${putImg.status} ${putImg.raw.slice(0, 200)}`);
-        return;
-      }
-      console.log(`${file} enviado`);
+      const txt = await put.text();
+      console.log(`[BACKUP] ${file} -> ${put.status}`);
+      if (!put.ok) { console.error(`[BACKUP] Erro ${file}: ${txt.slice(0, 200)}`); return; }
     }
-    console.log('Backup completo!');
+    console.log('[BACKUP] Completo!');
   } catch (err) {
-    console.error('Erro no backup:', err);
+    console.error('[BACKUP] Erro:', err);
   }
 }
 
