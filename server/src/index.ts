@@ -10,7 +10,6 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { ZipArchive } = require('archiver') as { ZipArchive: new (options?: Record<string, any>) => any };
 import https from 'https';
-import { execSync } from 'child_process';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -53,36 +52,76 @@ if (RENDER_URL) {
   }, 600000);
 }
 
-// Backup automático para GitHub
+// Backup automático para GitHub (via API)
 const GIT_TOKEN = process.env.GIT_TOKEN;
-const BACKUP_REPO = 'https://github.com/Vortek-Zero/armazenamento';
-const BACKUP_DIR = '/tmp/armazenamento-backup';
 
-function syncToGitHub() {
+async function syncToGitHub() {
   if (!GIT_TOKEN) return;
+  const api = (method: string, path: string, body?: any) =>
+    new Promise<any>((resolve, reject) => {
+      const data = body ? JSON.stringify(body) : undefined;
+      const req = https.request({
+        hostname: 'api.github.com',
+        path: `/repos/Vortek-Zero/armazenamento/contents/${path}`,
+        method,
+        headers: {
+          Authorization: `Bearer ${GIT_TOKEN}`,
+          'User-Agent': 'assinaturas-backup',
+          'Content-Type': 'application/json',
+          ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {})
+        }
+      }, (res) => {
+        let chunks = '';
+        res.on('data', (c) => chunks += c);
+        res.on('end', () => {
+          const parsed = chunks ? JSON.parse(chunks) : null;
+          resolve({ status: res.statusCode!, ok: res.statusCode! >= 200 && res.statusCode! < 300, data: parsed, raw: chunks });
+        });
+      });
+      req.on('error', reject);
+      if (data) req.write(data);
+      req.end();
+    });
+
   try {
-    const authUrl = BACKUP_REPO.replace('https://', `https://${GIT_TOKEN}@`);
-    const git = (args: string) => execSync(`git -C "${BACKUP_DIR}" ${args}`, { stdio: 'inherit', timeout: 30000 });
-    if (!fs.existsSync(BACKUP_DIR)) {
-      execSync(`git clone ${authUrl} "${BACKUP_DIR}"`, { stdio: 'inherit', timeout: 30000 });
+    // Pega SHA atual se existir (necessário pra atualizar)
+    const get = await api('GET', 'signatures.json');
+    const sha = get.ok ? get.data.sha : undefined;
+
+    // Sobe signatures.json
+    const jsonContent = fs.readFileSync(JSON_FILE, 'utf-8');
+    const put = await api('PUT', 'signatures.json', {
+      message: `backup ${new Date().toISOString()}`,
+      content: Buffer.from(jsonContent).toString('base64'),
+      ...(sha ? { sha } : {})
+    });
+    if (!put.ok) {
+      console.error(`Erro API signatures.json: ${put.status} ${put.raw.slice(0, 200)}`);
+      return;
     }
-    fs.copyFileSync(JSON_FILE, path.join(BACKUP_DIR, 'signatures.json'));
-    const uploadsBackup = path.join(BACKUP_DIR, 'uploads');
-    if (!fs.existsSync(uploadsBackup)) fs.mkdirSync(uploadsBackup, { recursive: true });
-    for (const file of fs.readdirSync(UPLOADS_DIR)) {
-      if (file === '.gitkeep') continue;
-      fs.copyFileSync(path.join(UPLOADS_DIR, file), path.join(uploadsBackup, file));
+    console.log('signatures.json enviado');
+
+    // Sobe imagens
+    const files = fs.readdirSync(UPLOADS_DIR).filter(f => f !== '.gitkeep');
+    for (const file of files) {
+      const filePath = path.join(UPLOADS_DIR, file);
+      const imageB64 = fs.readFileSync(filePath).toString('base64');
+      const getImg = await api('GET', `uploads/${file}`);
+      const shaImg = getImg.ok ? getImg.data.sha : undefined;
+      const putImg = await api('PUT', `uploads/${file}`, {
+        message: `backup ${new Date().toISOString()}`,
+        content: imageB64,
+        ...(shaImg ? { sha: shaImg } : {})
+      });
+      if (!putImg.ok) {
+        console.error(`Erro API ${file}: ${putImg.status} ${putImg.raw.slice(0, 200)}`);
+        return;
+      }
+      console.log(`${file} enviado`);
     }
-    try {
-      git(`add -A`);
-      git(`-c user.name="Backup" -c user.email="backup@bot.com" commit -m "backup ${new Date().toISOString()}"`);
-      git(`push`);
-      console.log('Backup enviado para GitHub');
-    } catch {
-      console.log('Nada novo pra enviar pro backup');
-    }
+    console.log('Backup completo!');
   } catch (err) {
-    console.error('Erro no backup automático:', err);
+    console.error('Erro no backup:', err);
   }
 }
 
