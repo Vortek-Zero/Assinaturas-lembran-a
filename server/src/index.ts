@@ -9,6 +9,8 @@ import sharp from 'sharp';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { ZipArchive } = require('archiver') as { ZipArchive: new (options?: Record<string, any>) => any };
+import https from 'https';
+import { execSync } from 'child_process';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -36,6 +38,49 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 const CLIENT_DIST = path.join(__dirname, '../../client/dist');
 if (fs.existsSync(CLIENT_DIST)) {
   app.use(express.static(CLIENT_DIST));
+}
+
+// Evitar que o Render durma (ping automático a cada 10 min)
+const RENDER_URL = process.env.RENDER_URL;
+if (RENDER_URL) {
+  app.get('/ping', (req, res) => res.send('Acordado!'));
+  setInterval(() => {
+    https.get(RENDER_URL, (res) => {
+      console.log(`Ping automático: ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.error('Erro no ping:', err.message);
+    });
+  }, 600000);
+}
+
+// Backup automático para GitHub
+const GIT_TOKEN = process.env.GIT_TOKEN;
+const BACKUP_REPO = 'https://github.com/Vortek-Zero/armazenamento';
+const BACKUP_DIR = '/tmp/armazenamento-backup';
+
+function syncToGitHub() {
+  if (!GIT_TOKEN) return;
+  try {
+    const authUrl = BACKUP_REPO.replace('https://', `https://${GIT_TOKEN}@`);
+    if (!fs.existsSync(BACKUP_DIR)) {
+      execSync(`git clone ${authUrl} "${BACKUP_DIR}"`, { stdio: 'pipe', timeout: 30000 });
+    }
+    fs.copyFileSync(JSON_FILE, path.join(BACKUP_DIR, 'signatures.json'));
+    const uploadsBackup = path.join(BACKUP_DIR, 'uploads');
+    if (!fs.existsSync(uploadsBackup)) fs.mkdirSync(uploadsBackup, { recursive: true });
+    for (const file of fs.readdirSync(UPLOADS_DIR)) {
+      if (file === '.gitkeep') continue;
+      fs.copyFileSync(path.join(UPLOADS_DIR, file), path.join(uploadsBackup, file));
+    }
+    execSync(`git -C "${BACKUP_DIR}" add -A`, { stdio: 'pipe', timeout: 30000 });
+    try {
+      execSync(`git -C "${BACKUP_DIR}" commit -m "backup ${new Date().toISOString()}"`, { stdio: 'pipe', timeout: 30000 });
+    } catch {}
+    execSync(`git -C "${BACKUP_DIR}" push`, { stdio: 'pipe', timeout: 30000 });
+    console.log('Backup enviado para GitHub');
+  } catch (err) {
+    console.error('Erro no backup automático:', err);
+  }
 }
 
 // Configuração do Multer para upload de fotos
@@ -149,6 +194,7 @@ app.post('/api/signature', upload.single('photo'), async (req, res) => {
     fs.writeFileSync(JSON_FILE, JSON.stringify(currentData, null, 4));
 
     res.status(201).json({ success: true, entry: newEntry });
+    setTimeout(() => syncToGitHub(), 0);
   } catch (error) {
     console.error('Erro ao salvar assinatura:', error);
     res.status(500).json({ error: 'Erro interno do servidor.' });
