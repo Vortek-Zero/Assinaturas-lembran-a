@@ -127,6 +127,7 @@ app.post('/api/signature', upload.single('photo'), async (req, res) => {
       const buf = Buffer.from(drawImage.replace(/^data:image\/png;base64,/, ""), 'base64');
       await sharp(buf)
         .resize({ width: 800, withoutEnlargement: true })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
         .jpeg({ quality: 75 })
         .toFile(path.join(UPLOADS_DIR, fileName));
     } else {
