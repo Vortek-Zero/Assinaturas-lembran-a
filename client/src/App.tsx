@@ -118,9 +118,9 @@ function App() {
     }
   };
 
-  const handleDownloadImage = async (imageUrl: string, name: string) => {
+  const handleDownloadImage = async (imagePath: string, name: string) => {
     try {
-      const response = await fetch(imageUrl);
+      const response = await fetch(`${API}/uploads/${imagePath}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -328,7 +328,7 @@ function App() {
                     <span className="admin-item-date">{s.timestamp}</span>
                     <span className="admin-item-type">{s.type === 'draw' ? '✏️' : '📸'}</span>
                   </div>
-                  <button className="admin-download-btn" onClick={() => handleDownloadImage(s.image_url, s.name)} title="Baixar imagem">
+                  <button className="admin-download-btn" onClick={() => handleDownloadImage(s.imagePath, s.name)} title="Baixar imagem">
                     ⬇️
                   </button>
                 </div>
@@ -347,7 +347,7 @@ function App() {
                   <button className="delete-btn" onClick={() => handleDelete(s.id)}>Excluir</button>
                 </div>
                 <div className="signature-image-container">
-                  <img src={s.image_url} className="signature-image" alt="assinatura" />
+                  <img src={`${API}/uploads/${s.imagePath}`} className="signature-image" alt="assinatura" />
                 </div>
               </div>
             ))
